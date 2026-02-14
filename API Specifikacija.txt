@@ -1,0 +1,49 @@
+﻿1. Autentifikacija i Tokenizacija
+Endpoint: POST /login
+* Važno: Backend kreira JWT token u koji je enkapsuliran device_id. Svaki naredni poziv API-ja dekodira token i proverava identitet korisnika bez potrebe za ponovnim slanjem ID-a uređaja.
+* Scenario A (Registracija - Prvi put):
+   * Request: {"device_id": "XY", "height": 185, "unit": "cm", "language": "sr", "is_right_handed": true, "terms_accepted": true}
+   * Response (201 Created): {"token": "JWT_ENCODED_WITH_DEVICE_ID"}
+* Scenario B (Login - Svaki sledeći put):
+   * Request: {"device_id": "XY"}
+   * Response (200 OK): {"token": "JWT_ENCODED_WITH_DEVICE_ID", "user_profile": {...}}[a][b][c][d]
+2. Upravljanje Profilom
+Endpoint: PUT /profile
+* Header: Authorization: Bearer <token>
+* Request: {"height": 182, "language": "en"}
+* Response (200 OK): Uspešno ažurirano.
+3. Slanje videa (Upload)
+Endpoint: POST /upload
+* Header: Authorization: Bearer <token>
+* Type: multipart/form-data
+* Fajlovi: front_video_2026_01_30_08_24, side_video__2026_01_30_08_24
+* Response (202 Accepted): {"job_id": "ABC_123", "status": "processing"}[e][f]
+4. Status Obrade (Polling)
+Endpoint: GET /status/{job_id}
+* Header: Authorization: Bearer <token>
+* Response (200 OK): ```json { "status": "completed", "video_url": "https://api.basket.com/v1/device_id/result/result_99.mp4" }
+Status: running/completed/failed [g][h][i][j][k][l][m][n]
+
+
+* 5. Istorija i Brisanje
+* GET /history: Vraća niz svih prethodnih obrada.
+* DELETE /history/{id}: Briše na device-u kompletan item: Front, Side i result video.
+________________
+
+
+
+
+[a]Da li nam je potreban refresh token? JWT token kratko traje.
+[b]Mozemo da definisemo koliko traje. Definisacemo 30 dana npr.
+[c]I nakon 30 dana ga odjavi?
+[d]Svejedno je koliko traje, on ce automatski dodeliti novi.
+[e]Validacija? Format, velicina ...
+[f]Nije deo api apecifikacije. To cemo kasnije.
+[g]Ovo mi nije jasno
+[h]Ti moras da cekas da se zavrsi ovo. Ti gadjas sve dok ne dobijes completed. Svakih X sekundi.
+[i]Ja mislim da je to suvisno opterecivanje servera.
+[j]Tako se to radi i tako mora.
+[k]Zamisli da imas 100 aktivnih korisnika u isto vrijeme pa sve to pomnozi :D
+[l]Pogledaj mozda ima neko drugo resenje za ovo
+[m]Nema bolje resenje. To mi koristimo u firmi. Sve sto dugo traje mora tako. Mi imamo neke obrade po 4-5 minuta.
+[n]Smanjis na 10 sekundi request izmedju i resen problem. Ako imas million korisnika, onda su to vec drugi sistemi - distributivni sistemi. Za to ti treba poseban admin. Otom potom. Za prvih 100K korisnika ne brinemo.
