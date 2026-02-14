@@ -1,5 +1,5 @@
-import os
 import uuid
+from pathlib import Path
 
 from flask import current_app
 from flask import jsonify
@@ -45,27 +45,26 @@ def upload_video():
     job_id = str(uuid.uuid4())
 
     # Create user folder
-    user_folder = os.path.join(current_app.config['UPLOAD_FOLDER'], device_id)
-    os.makedirs(user_folder, exist_ok=True)
+    user_folder = Path(current_app.config['UPLOAD_FOLDER']) / device_id
+    user_folder.mkdir(parents=True, exist_ok=True)
 
     # Save files
     front_filename = secure_filename(f"{job_id}_front_{front_video.filename}")
     side_filename = secure_filename(f"{job_id}_side_{side_video.filename}")
 
-    front_path = os.path.join(user_folder, front_filename)
-    side_path = os.path.join(user_folder, side_filename)
+    front_path = str(user_folder / front_filename)
+    side_path = str(user_folder / side_filename)
 
     front_video.save(front_path)
     side_video.save(side_path)
 
     # Create job record with 'uploaded' status
-    job = Job(
-        job_id=job_id,
-        user_id=user.id,
-        front_video_path=front_path,
-        side_video_path=side_path,
-        status=STATUS_UPLOADED
-    )
+    job = Job(job_id=job_id,
+              user_id=user.id,
+              front_video_path=front_path,
+              side_video_path=side_path,
+              status=STATUS_UPLOADED
+              )
 
     db.session.add(job)
     db.session.commit()
