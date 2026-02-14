@@ -17,6 +17,14 @@ Endpoint: POST /upload
 * Header: Authorization: Bearer <token>
 * Type: multipart/form-data
 * Fajlovi: front_video_2026_01_30_08_24, side_video__2026_01_30_08_24
+* Response (201 Created):
+```json
+{
+"id": "ABC_123",
+} gde je ID vracen ID iz baze
+4. Obrada videa (Processing)
+Endpoint: POST /process
+* Request: {"job_id": "ABC_123"}
 * Response (202 Accepted): {"job_id": "ABC_123", "status": "processing"}[e][f]
 4. Status Obrade (Polling)
 Endpoint: GET /status/{job_id}
