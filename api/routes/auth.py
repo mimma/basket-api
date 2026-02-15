@@ -9,6 +9,9 @@ from api.constants import ERROR_MISSING_REGISTRATION_FIELDS
 from api.constants import ERROR_TERMS_NOT_ACCEPTED
 from api.models import User
 
+@app.route('/')
+def hello_world():
+    return 'Hello, World!'
 
 @app.route('/login', methods=['POST'])
 def login():
