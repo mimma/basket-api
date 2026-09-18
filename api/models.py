@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from datetime import timezone
 
@@ -43,6 +44,7 @@ class Job(db.Model):
     side_video_path = db.Column(db.String(500))
     result_video_url = db.Column(db.String(500))
     status = db.Column(db.String(50), nullable=False, default='uploaded')  # uploaded, processing, completed, failed
+    analysis_result = db.Column(db.Text)  # JSON rezultat suterska-ruka analize ({'front': ..., 'side': ...})
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, nullable=False,
                            default=lambda: datetime.now(timezone.utc),
@@ -55,6 +57,25 @@ class Job(db.Model):
             'status': self.status,
             'created_at': self.created_at.isoformat()
         }
-        if self.result_video_url:
-            result['video_url'] = self.result_video_url
+        if self.analysis_result:
+            analysis = self.get_analysis()
+            result['analysis'] = analysis
+            result['videos'] = self.result_videos(analysis)
         return result
+
+    @staticmethod
+    def result_videos(analysis: dict) -> list:
+        """Lista renderovanih videa iz analize: [{camera, shot_idx, url}, ...]."""
+        videos = []
+        for camera in ('front', 'side'):
+            for shot in analysis.get(camera, {}).get('shots', []):
+                if shot.get('video_url'):
+                    videos.append({'camera': camera, 'shot_idx': shot['shot_idx'],
+                                   'url': shot['video_url']})
+        return videos
+
+    def set_analysis(self, analysis: dict | None):
+        self.analysis_result = None if analysis is None else json.dumps(analysis)
+
+    def get_analysis(self) -> dict | None:
+        return None if not self.analysis_result else json.loads(self.analysis_result)

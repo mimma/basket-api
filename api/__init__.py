@@ -21,4 +21,5 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 from api import models
 from api.routes import auth
 from api.routes import video
+from api.routes import analyze
 from api.routes import user

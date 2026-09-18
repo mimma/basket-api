@@ -5,3 +5,13 @@ python-dotenv==1.0.0
 Werkzeug==3.0.1
 Flask-Migrate==4.1.0
 
+# --- suterska-ruka (analiza suta) ---
+# Biblioteka koristi legacy `mediapipe.solutions` API. Poslednja verzija
+# mediapipe-a koja ga ima je 0.10.21 (samo Python <= 3.12) i trazi numpy<2,
+# a numpy<2 podrzava opencv-python najkasnije 4.11.x.
+# Zato se sama biblioteka instalira posebno, bez rezolucije njenih zavisnosti:
+#   pip install --no-deps "suterska-ruka @ git+ssh://git@github.com/mimma/suterska-ruka.git@main"
+mediapipe==0.10.21
+numpy<2
+opencv-python==4.11.0.86
+ultralytics>=8.3.205,<9

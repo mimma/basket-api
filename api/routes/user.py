@@ -1,5 +1,3 @@
-import os
-
 from flask import jsonify
 from flask import request
 from flask_jwt_extended import get_jwt_identity
@@ -13,6 +11,7 @@ from api.constants import SUCCESS_JOB_DELETED
 from api.constants import SUCCESS_PROFILE_UPDATED
 from api.models import Job
 from api.models import User
+from api.storage import delete_job_files
 
 
 @app.route('/profile', methods=['PUT'])
@@ -69,12 +68,8 @@ def delete_history(id):
     if not job:
         return jsonify({'error': ERROR_JOB_NOT_FOUND}), 404
 
-    # Delete video files
-    if job.front_video_path and os.path.exists(job.front_video_path):
-        os.remove(job.front_video_path)
-    if job.side_video_path and os.path.exists(job.side_video_path):
-        os.remove(job.side_video_path)
-    # Note: result_video_url is external, not deleted here
+    # Brise front/side snimke i renderovane rezultat-videe
+    delete_job_files(job)
 
     # Delete job record
     db.session.delete(job)

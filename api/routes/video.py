@@ -1,17 +1,15 @@
 import uuid
-from pathlib import Path
 
-from flask import current_app
 from flask import jsonify
 from flask import request
 from flask_jwt_extended import get_jwt_identity
 from flask_jwt_extended import jwt_required
-from werkzeug.utils import secure_filename
 
 from api import app
 from api import db
 from api.constants import ERROR_BOTH_VIDEOS_REQUIRED
 from api.constants import ERROR_EMPTY_FILENAME
+from api.constants import ERROR_INVALID_VIDEO_EXTENSION
 from api.constants import ERROR_JOB_CANNOT_BE_PROCESSED
 from api.constants import ERROR_JOB_ID_REQUIRED
 from api.constants import ERROR_JOB_NOT_FOUND
@@ -20,6 +18,8 @@ from api.constants import STATUS_PROCESSING
 from api.constants import STATUS_UPLOADED
 from api.models import Job
 from api.models import User
+from api.storage import has_allowed_extension
+from api.storage import save_job_videos
 
 
 @app.route('/upload', methods=['POST'])
@@ -41,22 +41,12 @@ def upload_video():
     if front_video.filename == '' or side_video.filename == '':
         return jsonify({'error': ERROR_EMPTY_FILENAME}), 400
 
-    # Generate unique job_id
+    if not has_allowed_extension(front_video.filename) or not has_allowed_extension(side_video.filename):
+        return jsonify({'error': ERROR_INVALID_VIDEO_EXTENSION}), 400
+
+    # Generate unique job_id and save files to uploads/<device_id>/
     job_id = str(uuid.uuid4())
-
-    # Create user folder
-    user_folder = Path(current_app.config['UPLOAD_FOLDER']) / device_id
-    user_folder.mkdir(parents=True, exist_ok=True)
-
-    # Save files
-    front_filename = secure_filename(f"{job_id}_front_{front_video.filename}")
-    side_filename = secure_filename(f"{job_id}_side_{side_video.filename}")
-
-    front_path = str(user_folder / front_filename)
-    side_path = str(user_folder / side_filename)
-
-    front_video.save(front_path)
-    side_video.save(side_path)
+    front_path, side_path = save_job_videos(device_id, job_id, front_video, side_video)
 
     # Create job record with 'uploaded' status
     job = Job(job_id=job_id,

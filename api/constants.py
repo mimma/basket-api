@@ -6,7 +6,11 @@ ERROR_MISSING_REGISTRATION_FIELDS = 'Missing required fields for registration'
 ERROR_TERMS_NOT_ACCEPTED = 'Terms must be accepted'
 ERROR_BOTH_VIDEOS_REQUIRED = 'Both front_video and side_video are required'
 ERROR_EMPTY_FILENAME = 'Empty filename'
+ERROR_INVALID_VIDEO_EXTENSION = 'Unsupported video format. Allowed: mp4, avi, mov'
+ERROR_ANALYSIS_FAILED = 'Video analysis failed'
 ERROR_JOB_ID_REQUIRED = 'job_id is required'
+ERROR_RESULT_VIDEO_NOT_FOUND = 'Result video not found'
+ERROR_INVALID_CAMERA = 'camera must be front or side'
 ERROR_JOB_CANNOT_BE_PROCESSED = 'Job cannot be processed. Current status: {status}'
 
 # Success Messages

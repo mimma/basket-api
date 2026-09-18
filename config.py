@@ -12,3 +12,10 @@ class Config:
 
     UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER') or 'uploads'
     MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500MB max file size
+    ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mov'}
+
+    # suterska-ruka: YOLO model za detekciju igraca i lopte
+    MODEL_PATH = os.environ.get('MODEL_PATH') or 'models/best.pt'
+
+    # ffmpeg za prepakivanje rezultat-videa u H.264 (opciono; bez njega ostaje mp4v)
+    FFMPEG_PATH = os.environ.get('FFMPEG_PATH') or 'ffmpeg'
