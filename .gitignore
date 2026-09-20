@@ -36,3 +36,5 @@ htmlcov/
 
 # Logs
 *.log
+# Batch render izlaz (scripts/render_videos.py)
+result_videos/
