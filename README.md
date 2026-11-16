@@ -5,8 +5,11 @@ Flask REST API za analizu tehnike košarkaškog šuta. Klijent (mobilna aplikaci
 
 - **JSON rezultat analize**: faze šuta (početak, set point, izbačaj, skok), greške u
   tehnici po frejmu i zbirno po šutu;
-- **anotirani video** po šutu: originalni kadar sa iscrtanim skeletom, loptom,
-  fazom šuta i istaknutim greškama.
+- **video** po šutu: isečak šuta sa linijama skeleta, usporen na greškama i sa
+  pauzom na sredini svake greške;
+- **JSON izveštaj** po šutu (izlaz biblioteke za crtanje): greške sa intervalima
+  (frejmovi i sekunde u tom videu), usporenja i pauze. Frontend iz njega uzima sve
+  što crta preko videa.
 
 Samu analizu radi biblioteka [suterska-ruka](https://github.com/mimma/suterska-ruka)
 (YOLO za igrača i loptu, MediaPipe za pozu). API je omotač oko nje: autentikacija po
@@ -318,8 +321,11 @@ Glavni endpoint. `multipart/form-data` sa dva fajla: `front_video` (spreda) i
 3. ako snimak nosi `rotate` metapodatke (telefon), fizički ga okrene ffmpeg-om i
    prepiše na istom mestu;
 4. pušta analizu obe kamere (sinhrono, u okviru zahteva);
-5. za svaki šut sa statusom `ok` renderuje anotirani video u
-   `uploads/<device_id>/results/<job_id>/<camera>_<shot_idx>.mp4` (H.264);
+5. za svaki šut sa statusom `ok` renderuje video u
+   `uploads/<device_id>/results/<job_id>/<camera>_<shot_idx>.mp4` (H.264): isečak
+   šuta sa linijama skeleta, usporen na frejmovima sa greškom i sa pauzom od 1 s
+   na sredini svake greške. Greške se **ne crtaju u video**; frontend ih crta sam
+   na osnovu JSON izveštaja koji se vraća u `shots[].video_report`;
 6. upisuje rezultat u bazu i vraća ga.
 
 Odgovori:
@@ -353,9 +359,10 @@ Primer odgovora (skraćen):
           "status": "ok",
           "phases": {"shot_start": 12, "set_points": [31], "release_point": 45,
                      "jump": {"start": 28, "top": 44, "end": 58}},
-          "errors_per_frame": {"14": ["siroko stopalo"], "15": ["siroko stopalo", "lopta van tela"]},
-          "error_label_counts": {"lopta van tela": 4, "siroko stopalo": 14},
-          "video_url": "/result/92da0c0c-aece-42ee-a8fe-ef401a940247/front/0"
+          "errors_per_frame": {"14": ["presirok suterski stav"], "15": ["presirok suterski stav", "nepravilno dizanje lopte"]},
+          "error_label_counts": {"nepravilno dizanje lopte": 4, "presirok suterski stav": 14},
+          "video_url": "/result/92da0c0c-aece-42ee-a8fe-ef401a940247/front/0",
+          "video_report": { ... }
         }
       ]
     },
@@ -450,13 +457,62 @@ Po šutu (`shots[i]`):
 | `errors_per_frame` | mapa `"frejm" → [oznake grešaka]`, samo frejmovi koji imaju grešku |
 | `error_label_counts` | zbirno: oznaka greške → u koliko frejmova se pojavila |
 | `video_url` | putanja za `GET /result/...`; `null` ako renderovanje nije uspelo |
+| `video_report` | JSON izveštaj za crtanje preko videa (vidi ispod); `null` ako renderovanje nije uspelo |
+
+### `video_report`: JSON izveštaj za crtanje
+
+`shots[].video_report` je **izlaz za frontend**: iz njega se uzima sve što se crta preko
+videa sa `video_url`. Čuva se u bazi uz rezultat, pa ga vraćaju i `/status` i `/history`.
+Dolazi direktno iz `save_result_video` biblioteke suterska-ruka; API izbacuje interna
+polja `video_path` i `source_video`, a `video` je ime isporučenog videa. **Svi frejmovi i sekunde
+odnose se na renderovani video** (sa usporenjem i pauzama), pa frontend može direktno
+da crta po njemu:
+
+| Polje | Opis |
+|---|---|
+| `video`, `camera`, `shooting_hand` | ime videa na koji se izveštaj odnosi, kamera, ruka |
+| `fps`, `width`, `height`, `frame_count`, `duration_seconds` | parametri renderovanog videa |
+| `clip_start_frame`, `clip_frame_count` | gde u originalnom snimku počinje isečak šuta i koliko frejmova ima (bez usporenja i pauza) |
+| `bbox_xyxy` | isečak originalnog frejma koji je renderovan |
+| `slow_motion.factor` | koliko puta se ponavlja frejm sa greškom |
+| `slow_motion.intervals[]` | usporeni delovi videa: `start_frame`/`end_frame` (uključivo), `start_second`/`end_second`, `source_start_frame`/`source_end_frame` |
+| `pause_seconds` | trajanje pauze po grešci |
+| `errors[]` | po grešci jedan interval: `error` (oznaka), `description`, `start_frame`/`end_frame` (uključivo), `start_second` (`start_frame / fps`), `end_second` (`(end_frame + 1) / fps`), `source_start_frame`/`source_end_frame` i `pause` (isti oblik, frejmovi zaustavljenog videa za tu grešku) |
+
+Primer (skraćen):
+
+```json
+{
+  "video": "front_0.mp4",
+  "camera": "front", "shooting_hand": "right",
+  "fps": 29.83, "width": 419, "height": 757,
+  "frame_count": 282, "duration_seconds": 9.453,
+  "clip_start_frame": 0, "clip_frame_count": 57,
+  "bbox_xyxy": [155, 306, 574, 1063],
+  "slow_motion": {"factor": 8, "intervals": [
+    {"start_frame": 9, "end_frame": 32, "start_second": 0.302, "end_second": 1.106,
+     "source_start_frame": 9, "source_end_frame": 11}
+  ]},
+  "pause_seconds": 1.0,
+  "errors": [
+    {"error": "nepravilno dizanje lopte", "description": "...",
+     "start_frame": 17, "end_frame": 78, "start_second": 0.57, "end_second": 2.648,
+     "source_start_frame": 3, "source_end_frame": 6,
+     "pause": {"start_frame": 41, "end_frame": 70, "start_second": 1.374, "end_second": 2.380,
+               "source_start_frame": 5, "source_end_frame": 5}}
+  ]
+}
+```
+
+Opisi grešaka su za sada placeholder („Lorem ipsum...") dok se u biblioteci ne napišu pravi.
 
 Oznake grešaka koje biblioteka trenutno prepoznaje:
 
-- **front kamera**: `lakat presiroko`, `lopta van glave`, `lopta van tela`, `nakrivljenost`,
-  `nesimetricno savijena kolena`, `nesuterski lakat na gore`, `pada nesuterska ruka`,
-  `prenisko lopta`, `razdvajanje ruku presiroko`, `ruke idu u desno`, `ruke idu u levo`,
-  `ruke se ukrstaju`, `siroko stopalo`, `usko stopalo`
+- **front kamera**: `lakat presiroko`, `lopta van glave`, `nakrivljenost`,
+  `nepravilna rotacija ruku pri izbacaju`, `nepravilno dizanje lopte`,
+  `nepravilno savijena kolena`, `nesuterski lakat na gore`, `pada nesuterska ruka`,
+  `prenisko lopta`, `presirok suterski stav`, `razdvajanje ruku pri izbacaju`,
+  `ruke idu u levo`, `ruke se ukrstaju`, `usko stopalo`
 - **side kamera**: `kontra ugao sake`, `lopta iza glave`, `nadlaktica ispred tela`,
   `nadlaktica iza tela`, `prave noge`, `predubok stav`
 
@@ -473,11 +529,8 @@ Originali se ne menjaju (rade se na kopiji u privremenom folderu).
 ```bash
 source venv/bin/activate
 
-# videos/{front,side}/*.mp4 -> result_videos/<ime>_shot<N>.mp4 + summary.json
+# videos/{front,side}/*.mp4 -> result_videos/<ime>_shot<N>.mp4 + <ime>_shot<N>.json (video_report) + summary.json
 python scripts/render_videos.py
-
-# bez MediaPipe skeleta (ostaju lopta, faza šuta i istaknute greške)
-python scripts/render_videos.py --no-skeleton -o result_videos/no_skeleton
 
 # drugi ulazni/izlazni folder, levoruk igrač
 python scripts/render_videos.py -i /putanja/do/snimaka -o /putanja/do/izlaza --shooting-hand left

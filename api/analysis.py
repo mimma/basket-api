@@ -1,7 +1,10 @@
 """Integracija suterska-ruka biblioteke: jedan model po procesu.
 
-Pored JSON rezultata, za svaki uspesno analizirani sut renderuje se i
-anotirani video (skelet, lopta, faza suta, istaknute greske)."""
+Pored JSON rezultata, za svaki uspesno analizirani sut renderuje se video
+(isecak suta sa linijama skeleta, usporenjem i pauzama na greskama). Biblioteka
+vise ne crta greske u video; njen JSON izvestaj (izlaz `save_result_video`) vraca
+se po sutu kao `video_report` i iz njega frontend uzima sve za crtanje (frejmovi i
+sekunde u njemu odnose se na renderovani video)."""
 import logging
 import shutil
 import subprocess
@@ -9,11 +12,9 @@ import tempfile
 import threading
 from pathlib import Path
 
-import contextlib
 import cv2
 import json
 from flask import current_app
-import mediapipe as mp
 from suterska_ruka.analyze_video import AnalyzeStages
 from suterska_ruka.analyze_video import VideoAnalysisError
 from suterska_ruka.analyzer import DEFAULT_INFERENCE_PARAMETERS
@@ -77,8 +78,8 @@ def normalize_rotation(video_path: str) -> None:
     """Fizicki okrece snimak prema njegovim rotate metapodacima i prepisuje ga na istom mestu.
 
     OpenCV, kroz koji biblioteka cita frejmove, tu rotaciju ignorise: poza bi se
-    trazila na polozenom igracu, a renderovani video (skelet, tekst, isticanje
-    gresaka) bio bi polozen. Bez ffmpeg-a snimak ostaje kakav jeste."""
+    trazila na polozenom igracu, a renderovani video
+    (skelet) bio bi polozen. Bez ffmpeg-a snimak ostaje kakav jeste."""
     ffmpeg = shutil.which(current_app.config['FFMPEG_PATH'])
     if ffmpeg is None:
         return
@@ -122,46 +123,42 @@ def _transcode_to_h264(src: Path, dst: Path) -> None:
         shutil.copyfile(src, dst)
 
 
-@contextlib.contextmanager
-def _skeleton_drawing(enabled: bool):
-    """save_result_video nema opciju za skelet, pa se mediapipe crtanje landmarkova
-    privremeno iskljuci (poziva se pod _lock, pa je patch bezbedan)."""
-    if enabled:
-        yield
-        return
-    drawing_utils = mp.solutions.drawing_utils
-    original = drawing_utils.draw_landmarks
-    drawing_utils.draw_landmarks = lambda *args, **kwargs: None
-    try:
-        yield
-    finally:
-        drawing_utils.draw_landmarks = original
-
-
 def _render_shot_video(data_class, video_path: str, camera: str, shot_idx: int,
-                       shooting_hand: str, results_dir: Path, draw_skeleton: bool = True) -> Path | None:
-    """Renderuje anotirani video jednog suta u results_dir/<camera>_<shot_idx>.mp4."""
+                       shooting_hand: str, results_dir: Path) -> dict | None:
+    """Renderuje video jednog suta u results_dir/<camera>_<shot_idx>.mp4 i vraca
+    JSON izvestaj biblioteke za taj video (None ako renderovanje nije uspelo)."""
     cap = cv2.VideoCapture(video_path)
     try:
         with tempfile.TemporaryDirectory(prefix='basket-render-') as tmp:
-            with _skeleton_drawing(draw_skeleton):
-                save_result_video(data_class, camera, cap, save_path=tmp, shooting_hand=shooting_hand)
+            report = save_result_video(data_class, camera, cap, save_path=tmp,
+                                       shooting_hand=shooting_hand)
             rendered = list(Path(tmp).glob('*.mp4'))
             if len(rendered) != 1:
                 raise ValueError(f"Expected one rendered video, found {len(rendered)}")
             results_dir.mkdir(parents=True, exist_ok=True)
             dst = results_dir / result_video_filename(camera, shot_idx)
             _transcode_to_h264(rendered[0], dst)
-            return dst
+            return _public_report(report, dst.name)
     except (ValueError, OSError, cv2.error):
         logger.exception("Failed to render result video for %s shot %s", camera, shot_idx)
+        (results_dir / result_video_filename(camera, shot_idx)).unlink(missing_ok=True)
         return None
     finally:
         cap.release()
 
 
+# Polja izvestaja koja opisuju privremene/interne fajlove na serveru.
+_INTERNAL_REPORT_KEYS = ('video_path', 'source_video')
+
+
+def _public_report(report: dict, video_name: str) -> dict:
+    public = {k: v for k, v in report.items() if k not in _INTERNAL_REPORT_KEYS}
+    public['video'] = video_name
+    return public
+
+
 def _analyze_camera(video_path: str, camera: str, shooting_hand: str,
-                    job_id: str, results_dir: Path, draw_skeleton: bool = True) -> dict:
+                    job_id: str, results_dir: Path) -> dict:
     """Ekvivalent ShotAnalyzer.analyze(), prosiren renderovanjem videa po sutu."""
     normalize_rotation(video_path)
     stages = _get_stages()
@@ -177,21 +174,22 @@ def _analyze_camera(video_path: str, camera: str, shooting_hand: str,
         # sto je preduslov za save_result_video.
         shot = _build_shot(shot_idx, data_class, camera, shooting_hand)
         if shot['status'] == 'ok':
-            rendered = _render_shot_video(data_class, video_path, camera, shot_idx,
-                                          shooting_hand, results_dir, draw_skeleton)
-            shot['video_url'] = (None if rendered is None
-                                 else f"/result/{job_id}/{camera}/{shot_idx}")
+            report = _render_shot_video(data_class, video_path, camera, shot_idx,
+                                        shooting_hand, results_dir)
+            shot['video_url'] = None if report is None else f"/result/{job_id}/{camera}/{shot_idx}"
+            shot['video_report'] = report
         shots.append(shot)
 
     return {'camera': camera, 'shooting_hand': shooting_hand, 'shots': shots}
 
 
 def analyze_front_and_side(front_path: str, side_path: str, shooting_hand: str,
-                           job_id: str, results_dir: Path, draw_skeleton: bool = True) -> dict:
+                           job_id: str, results_dir: Path) -> dict:
     """Analizira par snimaka (front + side), renderuje video po sutu u results_dir
-    i vraca JSON-serializable dict po kameri (sa `video_url` po uspesnom sutu)."""
+    i vraca JSON-serializable dict po kameri (sa `video_url` i `video_report` po
+uspesnom sutu)."""
     with _lock:
-        front_result = _analyze_camera(front_path, 'front', shooting_hand, job_id, results_dir, draw_skeleton)
-        side_result = _analyze_camera(side_path, 'side', shooting_hand, job_id, results_dir, draw_skeleton)
+        front_result = _analyze_camera(front_path, 'front', shooting_hand, job_id, results_dir)
+        side_result = _analyze_camera(side_path, 'side', shooting_hand, job_id, results_dir)
 
     return {'front': front_result, 'side': side_result}

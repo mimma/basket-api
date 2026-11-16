@@ -35,8 +35,9 @@ from api.storage import save_job_videos
 def analyze_videos():
     """Prima `front_video` i `side_video` (multipart/form-data), snima ih,
     pusta suterska-ruka analizu nad oba snimka i vraca rezultat po kameri.
-    Za svaki uspesno analizirani sut renderuje anotirani video, dostupan na
-    GET /result/<job_id>/<camera>/<shot_idx> (`video_url` u rezultatu).
+    Za svaki uspesno analizirani sut renderuje video, dostupan na
+    GET /result/<job_id>/<camera>/<shot_idx> (`video_url` u rezultatu); JSON
+    izvestaj za crtanje je u `video_report` istog suta.
 
     Analiza se izvrsava sinhrono u okviru zahteva, pa odgovor moze potrajati
     vise desetina sekundi po snimku (CPU inference)."""
@@ -101,7 +102,7 @@ def analyze_videos():
 @app.route('/result/<job_id>/<camera>/<int:shot_idx>', methods=['GET'])
 @jwt_required()
 def get_result_video(job_id, camera, shot_idx):
-    """Vraca renderovani (anotirani) video jednog suta kao `video/mp4`.
+    """Vraca renderovani video jednog suta kao `video/mp4`.
     `job_id` je UUID, `camera` je `front` ili `side`, `shot_idx` redni broj suta."""
     device_id = get_jwt_identity()
     user = User.query.filter_by(device_id=device_id).first()

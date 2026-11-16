@@ -1,8 +1,7 @@
 """Batch: analizira sve snimke iz foldera (videos/front/*.mp4, videos/side/*.mp4)
-i renderuje anotirani video po sutu, bez API-ja i baze.
+i renderuje po sutu video + JSON izvestaj za crtanje, bez API-ja i baze.
 
     python scripts/render_videos.py                       # videos/ -> result_videos/
-    python scripts/render_videos.py --no-skeleton         # bez mediapipe skeleta
     python scripts/render_videos.py -i videos -o out --shooting-hand left
 
 Kamera se odredjuje iz imena podfoldera (`front`/`side`) ili prefiksa fajla.
@@ -36,7 +35,6 @@ def main() -> int:
     p.add_argument('-i', '--input', type=Path, default=Path('videos'))
     p.add_argument('-o', '--output', type=Path, default=Path('result_videos'))
     p.add_argument('--shooting-hand', choices=['right', 'left'], default='right')
-    p.add_argument('--no-skeleton', action='store_true', help='ne crtaj mediapipe skelet')
     args = p.parse_args()
 
     videos = sorted(f for f in args.input.rglob('*') if f.suffix.lower() in VIDEO_SUFFIXES)
@@ -59,7 +57,7 @@ def main() -> int:
             print(f"{video} [{camera}] ...", flush=True)
             with _lock:
                 result = _analyze_camera(str(work_copy), camera, args.shooting_hand,
-                                         video.stem, shot_dir, draw_skeleton=not args.no_skeleton)
+                                         video.stem, shot_dir)
 
             rendered = []
             for shot in result['shots']:
@@ -68,6 +66,10 @@ def main() -> int:
                     dst = args.output / f"{video.stem}_shot{shot['shot_idx']}.mp4"
                     shutil.move(src, dst)
                     rendered.append(str(dst))
+                    # JSON izvestaj za crtanje, pored videa i sa njegovim imenom
+                    report = dict(shot['video_report'], video=dst.name)
+                    dst.with_suffix('.json').write_text(
+                        json.dumps(report, indent=2, ensure_ascii=False))
                 shot.pop('video_url', None)
             result['file'] = str(video)
             result['rendered'] = rendered
@@ -78,7 +80,7 @@ def main() -> int:
                   + (f" ({result['error']})" if 'error' in result else ''))
 
     (args.output / 'summary.json').write_text(json.dumps(summary, indent=2, ensure_ascii=False))
-    print(f"\nGotovo. Rezultati u {args.output}/ (summary.json + mp4 po sutu)")
+    print(f"\nGotovo. Rezultati u {args.output}/ (summary.json + mp4 i json po sutu)")
     return 0
 
 
