@@ -1,5 +1,6 @@
 import uuid
 
+from flask import current_app
 from flask import jsonify
 from flask import request
 from flask_jwt_extended import get_jwt_identity
@@ -20,6 +21,7 @@ from api.models import Job
 from api.models import User
 from api.storage import has_allowed_extension
 from api.storage import save_job_videos
+from api.worker import enqueue_job
 
 
 @app.route('/upload', methods=['POST'])
@@ -59,7 +61,9 @@ def upload_video():
     db.session.add(job)
     db.session.commit()
 
-    return jsonify({'id': job.id}), 201
+    # Klijent cuva `job_id` (UUID): njime pokrece obradu (/process) i prati je
+    # (/status), i posle prekida veze ili restarta aplikacije.
+    return jsonify({'id': job.id, 'job_id': job.job_id, 'status': job.status}), 201
 
 
 @app.route('/process', methods=['POST'])
@@ -76,20 +80,23 @@ def process_video():
     if not data or 'job_id' not in data:
         return jsonify({'error': ERROR_JOB_ID_REQUIRED}), 400
 
-    job_id = data['job_id']
-    job = Job.query.filter_by(id=job_id, user_id=user.id).first()
+    job = Job.query.filter_by(job_id=str(data['job_id']), user_id=user.id).first()
 
     if not job:
         return jsonify({'error': ERROR_JOB_NOT_FOUND}), 404
 
-    if job.status != STATUS_UPLOADED:
+    # Atomski prelaz uploaded -> processing: od dva istovremena /process (ponovljen
+    # zahtev, dupli klik) samo jedan pokrece analizu.
+    claimed = (Job.query.filter_by(id=job.id, status=STATUS_UPLOADED)
+               .update({'status': STATUS_PROCESSING}, synchronize_session=False))
+    db.session.commit()
+    if not claimed:
+        db.session.refresh(job)
         return jsonify({'error': ERROR_JOB_CANNOT_BE_PROCESSED.format(status=job.status)}), 400
 
-    # Update status to processing
-    job.status = STATUS_PROCESSING
-    db.session.commit()
-
-    # TODO: Trigger async video processing task here
+    # Analiza traje (desetine sekundi po snimku), pa se pusta u pozadini;
+    # klijent prati GET /status/<job_id> dok status ne postane completed/failed.
+    enqueue_job(current_app._get_current_object(), job.id)
 
     return jsonify({
         'job_id': job.job_id,

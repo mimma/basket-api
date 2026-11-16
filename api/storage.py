@@ -1,5 +1,3 @@
-import os
-import shutil
 from pathlib import Path
 
 from flask import current_app
@@ -36,12 +34,3 @@ def job_results_dir(device_id: str, job_id: str) -> Path:
     """Folder sa renderovanim rezultat-videima: uploads/<device_id>/results/<job_id>/."""
     return Path(current_app.config['UPLOAD_FOLDER']) / device_id / 'results' / job_id
 
-
-def delete_job_files(job) -> None:
-    """Brise front/side snimke i folder sa rezultat-videima jednog joba."""
-    for path in (job.front_video_path, job.side_video_path):
-        if path and os.path.exists(path):
-            os.remove(path)
-    results_dir = job_results_dir(job.user.device_id, job.job_id)
-    if results_dir.is_dir():
-        shutil.rmtree(results_dir, ignore_errors=True)

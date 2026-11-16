@@ -21,11 +21,18 @@ from suterska_ruka.analyzer import DEFAULT_INFERENCE_PARAMETERS
 from suterska_ruka.analyzer import _build_shot
 from suterska_ruka.write_video import save_result_video
 
+from api.constants import STATUS_COMPLETED
+from api.constants import STATUS_FAILED
+from api.models import Job
+from api.models import db
+from api.storage import job_results_dir
+
 logger = logging.getLogger(__name__)
 
 _stages: AnalyzeStages | None = None
-# AnalyzeStages nije thread-safe, a Flask obradjuje zahteve u vise niti,
-# pa se ucitavanje modela, analiza i renderovanje serijalizuju kroz jedan lock.
+# AnalyzeStages nije thread-safe, pa se u okviru jednog procesa ucitavanje modela,
+# analiza i renderovanje serijalizuju kroz jedan lock. Server svaku analizu
+# ionako pusta u zaseban proces (api/worker.py).
 _lock = threading.Lock()
 
 
@@ -124,9 +131,10 @@ def _transcode_to_h264(src: Path, dst: Path) -> None:
 
 
 def _render_shot_video(data_class, video_path: str, camera: str, shot_idx: int,
-                       shooting_hand: str, results_dir: Path) -> dict | None:
+                       shooting_hand: str, results_dir: Path, video_url: str) -> dict | None:
     """Renderuje video jednog suta u results_dir/<camera>_<shot_idx>.mp4 i vraca
-    JSON izvestaj biblioteke za taj video (None ako renderovanje nije uspelo)."""
+    JSON izvestaj biblioteke za taj video, sa `video_url` (None ako renderovanje
+    nije uspelo)."""
     cap = cv2.VideoCapture(video_path)
     try:
         with tempfile.TemporaryDirectory(prefix='basket-render-') as tmp:
@@ -138,7 +146,7 @@ def _render_shot_video(data_class, video_path: str, camera: str, shot_idx: int,
             results_dir.mkdir(parents=True, exist_ok=True)
             dst = results_dir / result_video_filename(camera, shot_idx)
             _transcode_to_h264(rendered[0], dst)
-            return _public_report(report, dst.name)
+            return _public_report(report, video_url)
     except (ValueError, OSError, cv2.error):
         logger.exception("Failed to render result video for %s shot %s", camera, shot_idx)
         (results_dir / result_video_filename(camera, shot_idx)).unlink(missing_ok=True)
@@ -148,12 +156,14 @@ def _render_shot_video(data_class, video_path: str, camera: str, shot_idx: int,
 
 
 # Polja izvestaja koja opisuju privremene/interne fajlove na serveru.
-_INTERNAL_REPORT_KEYS = ('video_path', 'source_video')
+_INTERNAL_REPORT_KEYS = ('video', 'video_path', 'source_video')
 
 
-def _public_report(report: dict, video_name: str) -> dict:
-    public = {k: v for k, v in report.items() if k not in _INTERNAL_REPORT_KEYS}
-    public['video'] = video_name
+def _public_report(report: dict, video_url: str) -> dict:
+    """Izvestaj za klijenta: bez internih putanja, a sa `video_url` (GET /result/...)
+    videa na koji se svi frejmovi i sekunde izvestaja odnose."""
+    public = {'video_url': video_url}
+    public.update((k, v) for k, v in report.items() if k not in _INTERNAL_REPORT_KEYS)
     return public
 
 
@@ -174,9 +184,10 @@ def _analyze_camera(video_path: str, camera: str, shooting_hand: str,
         # sto je preduslov za save_result_video.
         shot = _build_shot(shot_idx, data_class, camera, shooting_hand)
         if shot['status'] == 'ok':
+            video_url = f"/result/{job_id}/{camera}/{shot_idx}"
             report = _render_shot_video(data_class, video_path, camera, shot_idx,
-                                        shooting_hand, results_dir)
-            shot['video_url'] = None if report is None else f"/result/{job_id}/{camera}/{shot_idx}"
+                                        shooting_hand, results_dir, video_url)
+            shot['video_url'] = None if report is None else video_url
             shot['video_report'] = report
         shots.append(shot)
 
@@ -193,3 +204,23 @@ uspesnom sutu)."""
         side_result = _analyze_camera(side_path, 'side', shooting_hand, job_id, results_dir)
 
     return {'front': front_result, 'side': side_result}
+
+
+def run_job_analysis(job: Job, shooting_hand: str) -> dict:
+    """Analizira snimke joba, upisuje rezultat i status (`completed`/`failed`) u bazu
+    i vraca analizu. Exception iz analize se propagira (status ostaje nepromenjen)."""
+    results_dir = job_results_dir(job.user.device_id, job.job_id)
+    # Videi prethodnog (prekinutog) pokusaja ne smeju da ostanu dostupni preko /result.
+    shutil.rmtree(results_dir, ignore_errors=True)
+    analysis = analyze_front_and_side(job.front_video_path, job.side_video_path, shooting_hand,
+                                      job.job_id, results_dir)
+    # Biblioteka ne dize exception za los video, vec vraca status `failed_*` po kameri.
+    failed = analysis_failed(analysis['front']) or analysis_failed(analysis['side'])
+    job.status = STATUS_FAILED if failed else STATUS_COMPLETED
+    job.set_analysis(analysis)
+    db.session.commit()
+    return analysis
+
+
+def shooting_hand_of(user) -> str:
+    return 'right' if user.is_right_handed else 'left'

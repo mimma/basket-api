@@ -1,7 +1,9 @@
 # Basket API
 
 Flask REST API za analizu tehnike košarkaškog šuta. Klijent (mobilna aplikacija)
-šalje dva snimka istog šuta, spreda (`front`) i sa strane (`side`), a API vraća:
+šalje dva snimka istog šuta, spreda (`front`) i sa strane (`side`), pokrene analizu
+i prati njen status. Svi odgovori su JSON (osim samog videa), a kad je analiza
+gotova, API vraća:
 
 - **JSON rezultat analize**: faze šuta (početak, set point, izbačaj, skok), greške u
   tehnici po frejmu i zbirno po šutu;
@@ -113,6 +115,7 @@ Podešavanja se čitaju iz `.env` (preko `python-dotenv`) i `config.py`.
 | `UPLOAD_FOLDER` | `uploads` | Koren za snimke i renderovane videe. |
 | `MODEL_PATH` | `models/best.pt` | Putanja do YOLO težina. |
 | `FFMPEG_PATH` | `ffmpeg` | Ime ili puna putanja ffmpeg binarnog fajla. `ffprobe` se traži pored njega. |
+| `ANALYSIS_WORKERS` | `1` | Koliko analiza može da radi istovremeno. Svaka je zaseban proces sa svojom kopijom modela (~1-2 GB RAM-a). |
 
 Fiksno u `config.py`: maksimalna veličina zahteva 500 MB, dozvoljene ekstenzije
 snimaka `mp4`, `avi`, `mov`.
@@ -125,6 +128,7 @@ DATABASE_URL=sqlite:///basket.db
 UPLOAD_FOLDER=uploads
 MODEL_PATH=models/best.pt
 FFMPEG_PATH=ffmpeg
+ANALYSIS_WORKERS=1
 ```
 
 Generisanje tajnog ključa:
@@ -187,14 +191,15 @@ curl http://localhost:5000/
 # Hello, World!
 ```
 
-Za produkciju koristiti WSGI server, na primer gunicorn. **Bitno:** biblioteka nije
-thread-safe, pa API serijalizuje analizu kroz jedan lock po procesu. Više workera
-znači više paralelnih analiza, ali i više kopija modela u memoriji (po jedna po
-procesu, učitava se pri prvom zahtevu). Timeout mora da pokrije trajanje analize.
+Za produkciju koristiti WSGI server, na primer gunicorn, ali **sa jednim worker
+procesom**: red analiza je u memoriji server procesa, pa bi sa više workera svaki
+imao svoj red i svaki bi posle restarta nastavio iste prekinute jobove. Paralelnost
+analiza podešava se sa `ANALYSIS_WORKERS`, a zahteve paralelno obrađuju niti
+(`--threads`). Za više server procesa ili mašina treba pravi red poslova (RQ/Celery).
 
 ```bash
 pip install gunicorn
-gunicorn -w 2 -b 0.0.0.0:5000 --timeout 600 app:app
+gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 app:app
 ```
 
 ## Brzi test sa curl-om
@@ -217,32 +222,37 @@ TOKEN=$(curl -s -X POST $BASE/login -H 'Content-Type: application/json' \
   -d '{"device_id": "device-abc-123"}' | python -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 echo $TOKEN
 
-# 2. Izmena profila (ruka kojom šutira utiče na analizu)
+# 2. Izmena profila (ruka kojom šutira se ne menja posle registracije)
 curl -s -X PUT $BASE/profile -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"height": 182, "is_right_handed": true}'
+  -H 'Content-Type: application/json' -d '{"height": 182}'
 
-# 3. Analiza (sinhrono; traje od nekoliko sekundi do više desetina sekundi)
-curl -s -X POST $BASE/analyze -H "Authorization: Bearer $TOKEN" \
-  -F "front_video=@videos/front/front_01.mp4" \
-  -F "side_video=@videos/side/side_01.mp4" -o analyze.json -w "HTTP %{http_code}\n"
+# 3. Upload oba snimka → job_id (UUID), jedini identifikator koji klijent čuva
+JOB_ID=$(curl -s -X POST $BASE/upload -H "Authorization: Bearer $TOKEN" \
+  -F "front_video=@videos/front/front_01.mp4" -F "side_video=@videos/side/side_01.mp4" \
+  | python -c 'import sys,json; print(json.load(sys.stdin)["job_id"])')
+echo $JOB_ID
 
-# 4. Pročitaj job_id i URL-ove videa iz odgovora
-python -c "import json; b=json.load(open('analyze.json')); print(b['job_id']); print(*[v['url'] for v in b['videos']], sep='\n')"
-JOB_ID=$(python -c "import json; print(json.load(open('analyze.json'))['job_id'])")
+# 4. Pokretanje analize → 202, status processing
+curl -s -X POST $BASE/process -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d "{\"job_id\": \"$JOB_ID\"}"
 
-# 5. Preuzmi renderovane videe (front i side, šut 0)
+# 5. Praćenje statusa dok ne postane completed/failed (~40 s po snimku na CPU-u)
+while true; do
+  STATUS=$(curl -s -H "Authorization: Bearer $TOKEN" $BASE/status/$JOB_ID \
+    | python -c 'import sys,json; print(json.load(sys.stdin)["status"])')
+  echo "$STATUS"; [ "$STATUS" != processing ] && break; sleep 5
+done
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/status/$JOB_ID -o status.json
+python -c "import json; print(*[v['url'] for v in json.load(open('status.json'))['videos']], sep='\n')"
+
+# 6. Preuzmi renderovane videe (front i side, šut 0)
 curl -s -H "Authorization: Bearer $TOKEN" -o front_0.mp4 $BASE/result/$JOB_ID/front/0
 curl -s -H "Authorization: Bearer $TOKEN" -o side_0.mp4  $BASE/result/$JOB_ID/side/0
 ffprobe -v error -show_entries stream=codec_name,width,height -of csv=p=0 front_0.mp4
 # h264,418,756  (dimenzije zavise od snimka; kadar je isečen oko igrača)
 
-# 6. Status joba i istorija
-curl -s -H "Authorization: Bearer $TOKEN" $BASE/status/$JOB_ID
+# 7. Istorija
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/history
-
-# 7. Brisanje joba (numerički id iz odgovora, ne UUID); briše i fajlove sa diska
-ID=$(python -c "import json; print(json.load(open('analyze.json'))['id'])")
-curl -s -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/history/$ID
 ```
 
 Ako je izlaz JSON-a nečitljiv, dodaj `| python -m json.tool` na kraj komande.
@@ -258,16 +268,15 @@ ručno prepisivati:
 | `base_url` | `http://localhost:5000` | ručno, ako server nije lokalno |
 | `device_id` | identifikator uređaja | ručno |
 | `jwt_token` | Bearer token za sve zahteve | automatski posle Register/Login |
-| `job_db_id` | numerički `id` joba (za `/process` i `DELETE /history`) | automatski posle Analyze/Upload |
-| `job_id` | UUID joba (za `/status` i `/result`) | automatski posle Analyze/Process |
+| `job_id` | UUID joba (za `/process`, `/status`, `/result`) | automatski posle Upload |
 | `front_video_path`, `side_video_path` | apsolutne putanje do snimaka na tvom računaru | ručno (podešeno na primere iz `uploads/`) |
-| `result_camera`, `result_shot_idx` | koji video se traži u "Result video" | automatski iz prvog videa u odgovoru Analyze |
+| `result_camera`, `result_shot_idx` | koji video se traži u "Result video" | automatski iz prvog videa u odgovoru Status (kad je `completed`) |
 
-Redosled: **Auth → Login** (ili Register prvi put), **Analyze → Analyze front + side**,
-**Analyze → Result video**. Kod "Result video" klikni strelicu pored dugmeta Send i
+Redosled: **Auth → Login** (ili Register prvi put), **Video → Upload**, **Video →
+Process**, pa **Video → Status** ponavljaj dok `status` ne postane `completed`, zatim
+**Video → Result video**. Kod "Result video" klikni strelicu pored dugmeta Send i
 izaberi **Send and Download**, pa sačuvaj `.mp4`; obični Send prikazuje samo binarni
-sadržaj. Pošto `/analyze` može da traje dugo, u Postman podešavanjima
-(Settings → General → Request timeout) stavi 0 ili bar 300000 ms.
+sadržaj.
 
 Posle svake izmene kolekcije u repozitorijumu ponovo je importuj (Import → Replace),
 Postman ne prati promene fajla na disku.
@@ -300,57 +309,118 @@ curl -X POST http://localhost:5000/login -H 'Content-Type: application/json' \
 
 ### PUT /profile
 
-Menja profil. Dozvoljena polja: `height`, `unit`, `language`, `is_right_handed`.
-`is_right_handed` određuje ruku (`right`/`left`) koja se prosleđuje analizi.
-Odgovor 200 `{"message": "...", "user_profile": {...}}`.
+Menja profil. Dozvoljena polja: `height`, `unit`, `language`. Odgovor 200
+`{"message": "...", "user_profile": {...}}`.
+
+`is_right_handed` (ruka kojom igrač šutira, prosleđuje se analizi) postavlja se samo
+pri registraciji i **ne može da se promeni**: zahtev sa drugačijom vrednošću vraća
+400. Za drugu ruku korisnik pravi novi nalog ili piše podršci.
 
 ```bash
 curl -X PUT http://localhost:5000/profile -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"height":182,"language":"en","is_right_handed":false}'
+  -H 'Content-Type: application/json' -d '{"height":182,"language":"en"}'
 ```
 
-### POST /analyze
+### Tok analize: upload → process → status
 
-Glavni endpoint. `multipart/form-data` sa dva fajla: `front_video` (spreda) i
-`side_video` (sa strane). Dozvoljene ekstenzije `mp4`, `avi`, `mov`.
+Analiza traje desetine sekundi po snimku, pa se ne radi u okviru jednog zahteva:
+klijent pošalje snimke, pokrene obradu i prati status. Ceo tok vodi **jedan
+identifikator, `job_id` (UUID)**, koji klijent dobije od `/upload` i **sačuva**
+(npr. u lokalnu memoriju telefona) dok ne dobije konačan rezultat.
 
-Šta radi, redom:
+1. `POST /login` → `token`.
+2. `POST /upload` sa oba snimka → `job_id`, `status: uploaded`. Klijent ga čuva.
+3. `POST /process` sa `{"job_id": ...}` → `status: processing`. **Ovaj poziv pokreće
+   analizu.**
+4. `GET /status/{job_id}` na svakih 3-5 s dok je `status` `processing`. Kraj je
+   `completed` (rezultat, `video_report` i URL-ovi videa su u istom odgovoru) ili
+   `failed`.
+5. `GET /result/...` za svaki video iz `videos[]`.
 
-1. snima oba fajla u `uploads/<device_id>/<job_id>_front_<ime>` i `..._side_<ime>`;
-2. kreira job sa statusom `processing`;
-3. ako snimak nosi `rotate` metapodatke (telefon), fizički ga okrene ffmpeg-om i
+**Prekid veze ili gašenje aplikacije.** Analiza se izvršava na serveru i ne zavisi
+od konekcije klijenta. Kad se aplikacija vrati, uradi `GET /status/{job_id}` sa
+sačuvanim `job_id` i nastavi prema statusu:
+
+| `status` | Šta klijent radi |
+|---|---|
+| `uploaded` | upload je prošao, ali `/process` nije stigao: pozovi `POST /process` |
+| `processing` | analiza još traje: nastavi da pratiš `/status` |
+| `completed` | gotovo: pročitaj `analysis` i `videos[]`, obriši sačuvani `job_id` |
+| `failed` | analiza nije uspela: prikaži grešku, obriši sačuvani `job_id` |
+
+Ako je veza pukla **tokom** `/upload` (klijent nije dobio `job_id`), upload se
+ponavlja. Ako je `job_id` izgubljen, svi jobovi korisnika su u `GET /history`.
+
+Ako se **server** ugasi usred analize, ili proces analize umre (npr. nestane
+memorije), analiza se automatski pokreće ponovo (posle restarta servera na prvom
+zahtevu koji server primi). Klijent zato samo nastavlja da prati `/status`. Posle
+drugog neuspelog pokušaja job prelazi u `failed`.
+
+Istovremeno radi najviše `ANALYSIS_WORKERS` analiza (podrazumevano 1); ostali
+pokrenuti jobovi čekaju u statusu `processing`.
+
+```bash
+JOB_ID=$(curl -s -X POST http://localhost:5000/upload -H "Authorization: Bearer $TOKEN" \
+  -F "front_video=@videos/front/front_01.mp4" -F "side_video=@videos/side/side_01.mp4" \
+  | python -c 'import sys,json; print(json.load(sys.stdin)["job_id"])')
+curl -s -X POST http://localhost:5000/process -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d "{\"job_id\": \"$JOB_ID\"}"
+while true; do
+  STATUS=$(curl -s -H "Authorization: Bearer $TOKEN" http://localhost:5000/status/$JOB_ID \
+    | python -c 'import sys,json; print(json.load(sys.stdin)["status"])')
+  echo "$STATUS"; [ "$STATUS" != processing ] && break; sleep 5
+done
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:5000/status/$JOB_ID | python -m json.tool
+```
+
+### POST /upload
+
+`multipart/form-data` sa dva fajla: `front_video` (spreda) i `side_video` (sa strane).
+Dozvoljene ekstenzije `mp4`, `avi`, `mov`. Snima ih u
+`uploads/<device_id>/<job_id>_front_<ime>` i `..._side_<ime>` i kreira job sa statusom
+`uploaded`. **Analiza se ovde ne pokreće.**
+
+- 201 `{"id": 1, "job_id": "<UUID>", "status": "uploaded"}`; klijent čuva `job_id`
+- 400 ako nedostaje fajl, ime je prazno ili ekstenzija nije dozvoljena
+
+### POST /process
+
+Body `{"job_id": "<UUID iz /upload>"}`. Pokreće analizu u pozadini i odmah vraća
+202 `{"job_id": "<UUID>", "status": "processing"}`. Analiza, redom:
+
+1. ako snimak nosi `rotate` metapodatke (telefon), fizički ga okrene ffmpeg-om i
    prepiše na istom mestu;
-4. pušta analizu obe kamere (sinhrono, u okviru zahteva);
-5. za svaki šut sa statusom `ok` renderuje video u
+2. pušta analizu obe kamere;
+3. za svaki šut sa statusom `ok` renderuje video u
    `uploads/<device_id>/results/<job_id>/<camera>_<shot_idx>.mp4` (H.264): isečak
    šuta sa linijama skeleta, usporen na frejmovima sa greškom i sa pauzom od 1 s
    na sredini svake greške. Greške se **ne crtaju u video**; frontend ih crta sam
-   na osnovu JSON izveštaja koji se vraća u `shots[].video_report`;
-6. upisuje rezultat u bazu i vraća ga.
+   na osnovu JSON izveštaja `shots[].video_report`;
+4. upisuje rezultat u bazu i postavlja status `completed` ili `failed`.
 
-Odgovori:
+- 400 ako nema `job_id` ili job nije u statusu `uploaded` (na primer već je pokrenut)
+- 404 ako job ne postoji ili nije korisnikov
 
-| Kod | Značenje |
-|---|---|
-| 200 | obe kamere obrađene, `status: completed` |
-| 422 | biblioteka nije uspela da obradi neki snimak, `status: failed`; detalji u `result.<camera>.status` (`failed_video_open`, `failed_first_pass`, `failed_second_pass`). Druga kamera može imati validan rezultat i video. |
-| 500 | analiza je pukla neočekivano, `status: failed` |
-| 400 | nedostaje fajl, prazno ime ili nedozvoljena ekstenzija |
+### GET /status/{job_id}
 
-```bash
-curl -X POST http://localhost:5000/analyze -H "Authorization: Bearer $TOKEN" \
-  -F "front_video=@videos/front/front_01.mp4" -F "side_video=@videos/side/side_01.mp4"
-```
+Stanje joba po UUID-u: `id`, `job_id`, `status` (`uploaded`, `processing`,
+`completed`, `failed`), `created_at`. Kad postoji rezultat, i `analysis` (po kameri,
+vidi [Format rezultata analize](#format-rezultata-analize)) i `videos[]`.
 
-Primer odgovora (skraćen):
+`failed` znači da biblioteka nije uspela da obradi neki snimak (detalji u
+`analysis.<camera>.status`: `failed_video_open`, `failed_first_pass`,
+`failed_second_pass`; druga kamera može imati validan rezultat i video) ili da je
+analiza pukla neočekivano (tada nema `analysis`).
+
+Primer odgovora za `completed` (skraćen):
 
 ```json
 {
-  "id": 7,
+  "id": 1,
   "job_id": "92da0c0c-aece-42ee-a8fe-ef401a940247",
   "status": "completed",
-  "shooting_hand": "right",
-  "result": {
+  "created_at": "2026-11-16T10:12:03.512345",
+  "analysis": {
     "front": {
       "camera": "front", "shooting_hand": "right",
       "shots": [
@@ -362,7 +432,10 @@ Primer odgovora (skraćen):
           "errors_per_frame": {"14": ["presirok suterski stav"], "15": ["presirok suterski stav", "nepravilno dizanje lopte"]},
           "error_label_counts": {"nepravilno dizanje lopte": 4, "presirok suterski stav": 14},
           "video_url": "/result/92da0c0c-aece-42ee-a8fe-ef401a940247/front/0",
-          "video_report": { ... }
+          "video_report": {
+            "video_url": "/result/92da0c0c-aece-42ee-a8fe-ef401a940247/front/0",
+            "fps": 29.83, "frame_count": 282, "errors": [ ... ], ...
+          }
         }
       ]
     },
@@ -378,9 +451,9 @@ Primer odgovora (skraćen):
 ### GET /result/{job_id}/{camera}/{shot_idx}
 
 Vraća renderovani video jednog šuta kao `video/mp4` (podržava range zahteve, pa može
-direktno u `<video>` tag ili plejer). `job_id` je UUID, `camera` je `front` ili `side`,
-`shot_idx` je `shot_idx` iz rezultata. URL-ovi se ne sklapaju ručno, već se čitaju iz
-`videos[]` ili `shots[].video_url`.
+direktno u `<video>` tag ili plejer). URL-ovi se ne sklapaju ručno, već se čitaju iz
+`videos[]`, `shots[].video_url` ili `shots[].video_report.video_url`; relativni su,
+pa im klijent dodaje adresu servera.
 
 - 400 ako `camera` nije `front`/`side`
 - 404 ako job ne pripada korisniku ili video za taj šut ne postoji (na primer šut
@@ -391,47 +464,24 @@ curl -H "Authorization: Bearer $TOKEN" -o front_0.mp4 \
   http://localhost:5000/result/$JOB_ID/front/0
 ```
 
-### POST /upload, POST /process, GET /status/{job_id} (asinhroni tok)
-
-Pripremljen tok za obradu u pozadini; **analiza se u njemu još ne pokreće** (`/process`
-samo menja status u `processing`, obeleženo je kao TODO u kodu). Za stvarnu analizu
-koristiti `/analyze`.
-
-- `POST /upload`: isti `multipart` kao `/analyze`. Snima fajlove, kreira job sa
-  statusom `uploaded`, vraća 201 `{"id": <numerički id>}`.
-- `POST /process`: body `{"job_id": <numerički id iz /upload>}`. Prebacuje job iz
-  `uploaded` u `processing`, vraća 202 `{"job_id": "<UUID>", "status": "processing"}`.
-  400 ako job nije u statusu `uploaded`.
-- `GET /status/{job_id}`: po UUID-u. Vraća `id`, `job_id`, `status`, `created_at`, a
-  ako postoji rezultat i `analysis` (isto što i `result` iz `/analyze`) i `videos`.
-
-```bash
-ID=$(curl -s -X POST http://localhost:5000/upload -H "Authorization: Bearer $TOKEN" \
-  -F "front_video=@videos/front/front_01.mp4" -F "side_video=@videos/side/side_01.mp4" \
-  | python -c 'import sys,json; print(json.load(sys.stdin)["id"])')
-curl -s -X POST http://localhost:5000/process -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d "{\"job_id\": $ID}"
-curl -s -H "Authorization: Bearer $TOKEN" http://localhost:5000/status/$JOB_ID
-```
-
 ### GET /history
 
 Svi jobovi korisnika, najnoviji prvi, u istom obliku kao `/status` (sa `analysis` i
 `videos` kad postoje).
 
+Jobovi se ne brišu na serveru: snimci, rezultat i videi ostaju dostupni. Brisanje iz
+istorije je samo na telefonu; korisnik preuzme video i dalje ga obrađuje na osnovu
+`video_report`.
+
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:5000/history | python -m json.tool
 ```
 
-### DELETE /history/{id}
+### Greške
 
-Briše job po **numeričkom** `id`-u, zajedno sa front/side snimcima i celim folderom
-renderovanih videa `uploads/<device_id>/results/<job_id>/`. Odgovor 200
-`{"message": "Job deleted successfully"}`, 404 ako job ne postoji ili nije korisnikov.
-
-```bash
-curl -s -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:5000/history/7
-```
+Sve greške su JSON `{"error": "<poruka>"}` sa odgovarajućim HTTP kodom, uključujući
+nepostojeću rutu (404), pogrešnu metodu (405), prevelik fajl (413), neočekivanu
+grešku servera (500) i token koji nedostaje, nije ispravan ili je istekao (401).
 
 ## Format rezultata analize
 
@@ -558,15 +608,24 @@ Tok za jedan snimak (`api/analysis.py`):
    prepakuje ffmpeg-om (koji rotaciju primeni) i prepiše na istom mestu.
 2. **Analiza.** Biblioteka u prvom prolazu nađe igrača i kandidate za šuteve, u drugom
    prolazu za svaki šut pusti MediaPipe pozu i YOLO detekciju lopte na isečku oko
-   igrača, pa odredi faze šuta i greške po frejmu. Model se učitava jednom po procesu,
-   pri prvom zahtevu.
-3. **Renderovanje.** Za svaki šut sa statusom `ok` biblioteka iscrta skelet, okvir lopte,
-   fazu i istaknutu grešku u privremeni `mp4v` fajl, koji API prepakuje u H.264
+   igrača, pa odredi faze šuta i greške po frejmu. Model se učitava u procesu
+   analize, posebno za svaki job (vidi tačku 4).
+3. **Renderovanje.** Za svaki šut sa statusom `ok` biblioteka upiše isečak šuta sa
+   linijama skeleta, usporenjem i pauzama na greškama u privremeni `mp4v` fajl i vrati
+   JSON izveštaj (`video_report`). API video prepakuje u H.264
    (`libx264`, `yuv420p`, `faststart`) da bi se puštao u browseru i na telefonu.
    Bez ffmpeg-a fajl se samo kopira.
-4. **Konkurentnost.** Biblioteka nije thread-safe, a Flask obrađuje zahteve u više
-   niti, pa se cela obrada (analiza + renderovanje) serijalizuje kroz jedan lock.
-   Dva istovremena `/analyze` zahteva se izvršavaju jedan za drugim.
+4. **Pozadina i procesi** (`api/worker.py`). `/process` stavlja job u red u memoriji
+   server procesa i odmah odgovara. Za svaki job iz reda pokreće se **zaseban proces**
+   (`multiprocessing`, `spawn`) koji učita model, analizira, upiše rezultat u bazu i
+   ugasi se; istovremeno najviše `ANALYSIS_WORKERS` procesa. Tako analiza ne deli GIL
+   sa serverom, pad procesa (segfault, OOM) ne obara server, a memorija modela se
+   oslobađa posle svakog joba (cena: ~nekoliko sekundi učitavanja modela po jobu).
+   Proces koji umre pokušava se još jednom (kolona `jobs.attempts`, najviše 2 pokušaja),
+   pa job prelazi u `failed`. Jobovi zatečeni u `processing` posle restarta servera
+   vraćaju se u red na prvom zahtevu. Na početku svakog pokušaja briše se
+   `results/<job_id>/`, da ne ostanu videi prethodnog pokušaja. Red je u memoriji
+   **jednog server procesa**; za više procesa ili mašina treba RQ/Celery.
 
 Raspored fajlova na disku za jedan job:
 
@@ -595,12 +654,14 @@ basket-api/
 │   ├── __init__.py           # Flask app, SQLAlchemy, Migrate, JWT, registracija ruta
 │   ├── models.py             # User, Job (+ to_dict, result_videos)
 │   ├── constants.py          # poruke grešaka i statusi jobova
-│   ├── storage.py            # snimanje uploada, putanje rezultata, brisanje fajlova joba
+│   ├── storage.py            # snimanje uploada, putanje rezultata
 │   ├── analysis.py           # integracija suterska-ruka: rotacija, analiza, renderovanje, H.264
+│   ├── worker.py             # red jobova, analiza u zasebnim procesima, ponovni pokušaj, nastavak posle restarta
+│   ├── errors.py             # sve greške kao JSON {"error": ...}
 │   └── routes/
 │       ├── auth.py           # GET /, POST /login
-│       ├── user.py           # PUT /profile, GET /history, DELETE /history/<id>
-│       ├── analyze.py        # POST /analyze, GET /result/<job_id>/<camera>/<shot_idx>
+│       ├── user.py           # PUT /profile, GET /history
+│       ├── result.py         # GET /result/<job_id>/<camera>/<shot_idx>
 │       └── video.py          # POST /upload, POST /process, GET /status/<job_id>
 ├── scripts/
 │   └── render_videos.py      # batch analiza + renderovanje foldera bez API-ja
@@ -620,10 +681,11 @@ Proveri `python --version` unutar venv-a i napravi ga ponovo sa `python3.12 -m v
 sa rezolucijom zavisnosti. Ponovi korak 4 sa `--no-deps`, pa `pip install -r requirements.txt`
 da vrati pinove.
 
-**`FileNotFoundError: models/best.pt` pri prvom `/analyze`.** Model nije na putanji iz
-`MODEL_PATH`. Učitava se lenjo, pri prvom zahtevu, pa server normalno startuje bez njega.
+**Job odmah ode u `failed`, a u logu je `FileNotFoundError: models/best.pt`.** Model nije
+na putanji iz `MODEL_PATH`. Učitava se lenjo, pri prvoj analizi, pa server normalno
+startuje bez njega.
 
-**`/analyze` vraća 200, ali `shots` je prazan i nema videa.** Biblioteka nije prepoznala
+**Status je `completed`, ali `shots` je prazan i nema videa.** Biblioteka nije prepoznala
 šut (igrač nije ceo u kadru, loš ugao, prekratak ili predugačak snimak). To nije greška
 API-ja; probaj sa primerima iz `videos/`.
 
@@ -633,9 +695,6 @@ upozorenje `ffmpeg not found`.
 
 **Igrač je položen na izlaznom videu.** Isto: bez ffmpeg-a/ffprobe-a rotacija snimka se
 ne ispravlja.
-
-**Postman prijavi timeout na `/analyze`.** Povećaj Request timeout u podešavanjima
-Postmana (0 = bez ograničenja).
 
 **`Address already in use` na portu 5000.** Već radi jedna instanca (`python app.py`
 u drugom terminalu) ili drugi program. Ugasi je ili pokreni na drugom portu:

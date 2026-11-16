@@ -45,6 +45,8 @@ class Job(db.Model):
     result_video_url = db.Column(db.String(500))
     status = db.Column(db.String(50), nullable=False, default='uploaded')  # uploaded, processing, completed, failed
     analysis_result = db.Column(db.Text)  # JSON rezultat suterska-ruka analize ({'front': ..., 'side': ...})
+    # Koliko puta je analiza pokrenuta (ponavlja se ako proces umre ili se server ugasi).
+    attempts = db.Column(db.Integer, nullable=False, default=0, server_default='0')
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, nullable=False,
                            default=lambda: datetime.now(timezone.utc),

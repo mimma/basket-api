@@ -17,5 +17,8 @@ class Config:
     # suterska-ruka: YOLO model za detekciju igraca i lopte
     MODEL_PATH = os.environ.get('MODEL_PATH') or 'models/best.pt'
 
+    # Koliko analiza moze da radi istovremeno (svaka u svom procesu, ~1-2 GB RAM-a).
+    ANALYSIS_WORKERS = int(os.environ.get('ANALYSIS_WORKERS') or 1)
+
     # ffmpeg za prepakivanje rezultat-videa u H.264 (opciono; bez njega ostaje mp4v)
     FFMPEG_PATH = os.environ.get('FFMPEG_PATH') or 'ffmpeg'

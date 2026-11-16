@@ -67,7 +67,9 @@ def main() -> int:
                     shutil.move(src, dst)
                     rendered.append(str(dst))
                     # JSON izvestaj za crtanje, pored videa i sa njegovim imenom
-                    report = dict(shot['video_report'], video=dst.name)
+                    report = dict(shot['video_report'])
+                    report.pop('video_url', None)
+                    report = {'video': dst.name, **report}
                     dst.with_suffix('.json').write_text(
                         json.dumps(report, indent=2, ensure_ascii=False))
                 shot.pop('video_url', None)
