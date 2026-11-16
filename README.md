@@ -505,7 +505,7 @@ Po šutu (`shots[i]`):
 | `phases.release_point` | frejm izbačaja |
 | `phases.jump` | `{start, top, end}` frejmovi skoka, ili `null` ako skok nije detektovan |
 | `errors_per_frame` | mapa `"frejm" → [oznake grešaka]`, samo frejmovi koji imaju grešku |
-| `error_label_counts` | zbirno: oznaka greške → u koliko frejmova se pojavila |
+| `error_label_counts` | zbirno: oznaka greške → koliko frejmova traje (broj frejmova na kojima je detektovana, ne broj ponavljanja; svaka greška je jedan interval u `video_report.errors[]`) |
 | `video_url` | putanja za `GET /result/...`; `null` ako renderovanje nije uspelo |
 | `video_report` | JSON izveštaj za crtanje preko videa (vidi ispod); `null` ako renderovanje nije uspelo |
 
