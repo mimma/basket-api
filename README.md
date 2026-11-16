@@ -514,13 +514,14 @@ Po šutu (`shots[i]`):
 `shots[].video_report` je **izlaz za frontend**: iz njega se uzima sve što se crta preko
 videa sa `video_url`. Čuva se u bazi uz rezultat, pa ga vraćaju i `/status` i `/history`.
 Dolazi direktno iz `save_result_video` biblioteke suterska-ruka; API izbacuje interna
-polja `video_path` i `source_video`, a `video` je ime isporučenog videa. **Svi frejmovi i sekunde
+polja `video`, `video_path` i `source_video` i dodaje `video_url` videa na koji se izveštaj odnosi. **Svi frejmovi i sekunde
 odnose se na renderovani video** (sa usporenjem i pauzama), pa frontend može direktno
 da crta po njemu:
 
 | Polje | Opis |
 |---|---|
-| `video`, `camera`, `shooting_hand` | ime videa na koji se izveštaj odnosi, kamera, ruka |
+| `video_url` | putanja za `GET /result/...` videa na koji se izveštaj odnosi |
+| `camera`, `shooting_hand` | kamera, ruka |
 | `fps`, `width`, `height`, `frame_count`, `duration_seconds` | parametri renderovanog videa |
 | `clip_start_frame`, `clip_frame_count` | gde u originalnom snimku počinje isečak šuta i koliko frejmova ima (bez usporenja i pauza) |
 | `bbox_xyxy` | isečak originalnog frejma koji je renderovan |
@@ -533,7 +534,7 @@ Primer (skraćen):
 
 ```json
 {
-  "video": "front_0.mp4",
+  "video_url": "/result/92da0c0c-aece-42ee-a8fe-ef401a940247/front/0",
   "camera": "front", "shooting_hand": "right",
   "fps": 29.83, "width": 419, "height": 757,
   "frame_count": 282, "duration_seconds": 9.453,
