@@ -6,7 +6,10 @@
 # Virtual Environment
 venv*/
 
-
+migrations
+uploads
+videos
+result_videos
 # Python
 __pycache__/
 *.py[cod]
